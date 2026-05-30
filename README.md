@@ -31,7 +31,7 @@ The core problem this project solves — and the thing that makes it non-trivial
 ## Screenshots
 
 <p align="center">
-  <img src="docs/dashboard.png" alt="Live streaming dashboard" width="90%"/>
+  <img src="docs/Dashboard.png" alt="Live streaming dashboard" width="90%"/>
 </p>
 
 ---
