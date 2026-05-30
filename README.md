@@ -1,4 +1,3 @@
-
 # 📡 Private 5G Live Camera Streaming
 
 **Real-time IP camera surveillance over a private 5G network**
@@ -167,85 +166,32 @@ ping 172.20.0.55   # from your server — must succeed before proceeding
 
 ---
 
-#### On Open5GS
+#### On Open5GS / free5GC / OAI CN5G
 
-Edit `/etc/open5gs/smf.yaml`:
+> **This project was built and tested exclusively on Celona. The steps below have not been personally validated on other cores** — treat this as conceptual direction only. Refer to the official docs for your specific core and version.
 
-```yaml
-smf:
-  subnet:
-    - addr: 172.20.0.0/24
-      dnn: internet
-```
+The idea is the same across all cores: find where the SMF configures the **UE IP address pool** and set it to a range within your LAN subnet. Once the UE gets a LAN-routable IP, the rest of this guide applies without changes.
 
-Add a static route on your server so return traffic reaches the UE through the UPF's N6 interface:
+- **Open5GS** — `smf.subnet[].addr` in `/etc/open5gs/smf.yaml`
+- **free5GC** — `staticPools[].cidr` under `userplaneInformation` in `config/smfcfg.yaml`
+- **OAI CN5G** — `UE_IP_ADDRESS_POOL` environment variable in the UPF service config
 
-```bash
-sudo ip route add 172.20.0.0/24 via <UPF_N6_IP>
-```
-
-Restart: `sudo systemctl restart open5gs-smfd`
-
----
-
-#### On free5GC
-
-Edit `config/smfcfg.yaml`:
-
-```yaml
-userplaneInformation:
-  upNodes:
-    UPF:
-      sNssaiUpfInfos:
-        - dnnUpfInfoList:
-            - dnn: internet
-              pools:
-                - cidr: 172.20.0.0/24
-```
-
-Restart: `./run.sh`
-
----
-
-#### On OAI CN5G
-
-In `docker-compose.yml`, under the `oai-spgwu` service:
-
-```yaml
-environment:
-  - UE_IP_ADDRESS_POOL=172.20.0.0/24
-  - UE_IP_ADDRESS_RANGE=172.20.0.50-172.20.0.200
-```
-
-> **Note:** The above Open5GS / free5GC / OAI steps give the right direction but have not been tested on this exact lab setup. Treat them as a starting point — refer to each project's official docs for your specific version. The concept is identical across all cores: match the UE IP pool to your LAN subnet.
+After any change, restart the SMF/UPF, re-register the UE, and verify with `ping <UE_IP>` from your server before proceeding.
 
 ---
 
 ### Step 2 — Find your camera's RTSP URL
 
-Before configuring MediaMTX, confirm the camera is streaming and what its RTSP path is. This varies by camera manufacturer.
+Every camera has a different RTSP path — check your camera's manual or admin UI. For the SCB800 used in this project it is `rtsp://172.20.0.55:554/ch01/0`.
+
+Confirm the stream is reachable before configuring MediaMTX:
 
 ```bash
-# Install ffmpeg tools
 sudo apt install ffmpeg -y
-
-# Probe the camera — try common paths
-ffprobe -v quiet -print_format json -show_streams rtsp://172.20.0.55:554/ch01/0
-ffprobe -v quiet -print_format json -show_streams rtsp://172.20.0.55:554/stream
-ffprobe -v quiet -print_format json -show_streams rtsp://172.20.0.55:554/live
+ffprobe rtsp://<camera-ip>:554/<path>
 ```
 
-Common RTSP path patterns by manufacturer:
-
-| Manufacturer | Typical RTSP path |
-|---|---|
-| Hikvision | `/Streaming/Channels/101` |
-| Dahua | `/cam/realmonitor?channel=1&subtype=0` |
-| Reolink | `/h264Preview_01_main` |
-| Axis | `/axis-media/media.amp` |
-| Generic / SCB800 | `/ch01/0` |
-
-If `ffprobe` hangs or returns `Connection refused`, the routing from Step 1 is not complete. Do not proceed.
+If this hangs or returns `Connection refused`, the routing from Step 1 is not complete. Do not proceed.
 
 ---
 
@@ -342,142 +288,13 @@ sudo systemctl status mediamtx
 
 ---
 
-### Step 6 — Clone and configure the backend
+### Step 6 — Deploy the dashboard
 
-```bash
-git clone https://github.com/grahulreddyofficial/private-5g-streaming.git
-cd private-5g-streaming/backend
-npm install
-```
+Clone the repo, install dependencies for both `backend/` and `frontend/`, and configure a `.env` in the backend with your MediaMTX host, ports, and PostgreSQL credentials.
 
-Create a `.env` file:
+For production, build the React frontend (`npm run build`) and serve the `dist/` folder via **Nginx** as a reverse proxy — proxying `/api/` to the Node.js backend and `/whep/` to MediaMTX's WebRTC port (8889).
 
-```env
-PORT=3000
-MEDIAMTX_HOST=172.20.0.17
-MEDIAMTX_WEBRTC_PORT=8889
-MEDIAMTX_HLS_PORT=8888
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME=5glab
-DB_USER=your_db_user
-DB_PASSWORD=your_db_password
-```
-
-Run the backend as a system service:
-
-```bash
-sudo tee /etc/systemd/system/5g-backend.service > /dev/null << EOF
-[Unit]
-Description=Private 5G Streaming — Node.js backend
-After=network-online.target postgresql.service
-Wants=network-online.target
-
-[Service]
-WorkingDirectory=$(pwd)
-ExecStart=/usr/bin/node server.js
-Restart=on-failure
-RestartSec=5s
-EnvironmentFile=$(pwd)/.env
-User=$USER
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo systemctl daemon-reload
-sudo systemctl enable 5g-backend
-sudo systemctl start 5g-backend
-```
-
----
-
-### Step 7 — Build and serve the frontend
-
-```bash
-cd ../frontend
-npm install
-npm run build
-sudo cp -r dist /var/www/5g-streaming
-```
-
-Run the frontend dev server as a service (or skip and serve via Nginx in production):
-
-```bash
-# For development — run as a service
-sudo tee /etc/systemd/system/5g-frontend.service > /dev/null << EOF
-[Unit]
-Description=Private 5G Streaming — React frontend (dev)
-After=network-online.target
-
-[Service]
-WorkingDirectory=$(pwd)
-ExecStart=/usr/bin/npm run dev -- --host 0.0.0.0
-Restart=on-failure
-RestartSec=5s
-User=$USER
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo systemctl daemon-reload
-sudo systemctl enable 5g-frontend
-sudo systemctl start 5g-frontend
-```
-
----
-
-### Step 8 — Enable PostgreSQL on boot
-
-```bash
-sudo systemctl enable postgresql
-sudo systemctl start postgresql
-```
-
----
-
-### Step 9 — Configure Nginx
-
-```bash
-sudo tee /etc/nginx/sites-available/5g-streaming > /dev/null << 'EOF'
-server {
-    listen 80;
-    server_name 172.20.0.17;
-
-    # Serve built React frontend
-    root /var/www/5g-streaming;
-    index index.html;
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-
-    # Proxy backend API
-    location /api/ {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-
-    # Proxy MediaMTX WebRTC (WHEP)
-    location /whep/ {
-        proxy_pass http://127.0.0.1:8889/;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
-
-    # Proxy MediaMTX HLS fallback
-    location /hls/ {
-        proxy_pass http://127.0.0.1:8888/;
-    }
-}
-EOF
-
-sudo ln -s /etc/nginx/sites-available/5g-streaming /etc/nginx/sites-enabled/
-sudo nginx -t && sudo systemctl reload nginx
-sudo systemctl enable nginx
-```
+Enable all services to start automatically on boot using **systemd**. Write a `.service` file for the backend and frontend (or serve the built frontend purely through Nginx), enable PostgreSQL, MediaMTX, and Nginx with `systemctl enable`. The repo's structure have everything you need to wire this up.
 
 ---
 
@@ -547,53 +364,9 @@ startStream(
 
 This is the raw WHEP exchange — an SDP offer POST, an SDP answer back, no signalling server, no socket connections. If you want a production-grade client, use [`@eyevinn/whep-web-client`](https://www.npmjs.com/package/@eyevinn/whep-web-client).
 
-### Option 3 — HLS fallback (maximum compatibility)
+### Option 3 — HLS fallback
 
-For environments where WebRTC is blocked or unreliable, MediaMTX also publishes an HLS feed:
-
-```
-http://172.20.0.17:8888/ipCam1/index.m3u8
-```
-
-Use with `hls.js` for browsers that don't support HLS natively:
-
-```bash
-npm install hls.js
-```
-
-```javascript
-import Hls from 'hls.js';
-
-const video = document.getElementById('stream');
-const src = 'http://172.20.0.17:8888/ipCam1/index.m3u8';
-
-if (Hls.isSupported()) {
-  const hls = new Hls({ lowLatencyMode: true });
-  hls.loadSource(src);
-  hls.attachMedia(video);
-} else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-  video.src = src; // Safari native HLS
-}
-```
-
-HLS latency is typically 3–8 seconds. Use WebRTC (WHEP) for real-time monitoring.
-
----
-
-## Service management quick reference
-
-```bash
-# Check all services
-sudo systemctl status mediamtx 5g-backend 5g-frontend nginx postgresql
-
-# Restart after config changes
-sudo systemctl restart mediamtx
-sudo systemctl restart 5g-backend
-
-# View logs
-sudo journalctl -u mediamtx -f
-sudo journalctl -u 5g-backend -f
-```
+MediaMTX also publishes an HLS feed at `http://172.20.0.17:8888/ipCam1/index.m3u8` — useful if WebRTC is blocked in your environment, though latency will be 3–8 seconds instead of sub-500ms.
 
 ---
 
@@ -623,19 +396,48 @@ Check `.env` is present and PostgreSQL is running: `sudo systemctl status postgr
 
 ```
 private-5g-streaming/
-├── backend/                  # Node.js + Express API
-│   ├── routes/
+├── backend/
+│   ├── api.js
+│   ├── db.js
+│   ├── jwt.js
+│   ├── middleware/
+│   │   └── checktk.js
 │   └── package.json
-├── frontend/                 # React + Vite dashboard
+├── frontend/
+│   ├── index.html
+│   ├── vite.config.js
+│   ├── public/
 │   └── src/
+│       ├── App.jsx
+│       ├── auth/
+│       │   ├── auth.js
+│       │   └── ProtectedRoute.jsx
 │       ├── components/
-│       └── hooks/            # useWhepStream (WebRTC)
+│       │   ├── Login.jsx
+│       │   ├── MainLayout.jsx
+│       │   └── SignUp.jsx
+│       ├── icons/
+│       │   ├── Drone.jsx
+│       │   └── Helmet.jsx
+│       └── pages/
+│           ├── Home.jsx
+│           ├── MainDash.jsx
+│           ├── SmartCams.jsx
+│           ├── SmartPhones.jsx
+│           ├── SmartHelmets.jsx
+│           ├── Drones5G.jsx
+│           ├── IIoT.jsx
+│           ├── LoginPage.jsx
+│           └── SignUpPage.jsx
 ├── docs/
-│   ├── architecture.svg      # Layered system architecture
-│   ├── dataplane.svg         # End-to-end data plane flow
-│   ├── dashboard.png         # Dashboard screenshot
-│   └── celona-topology.png   # Live topology from Celona UI
-├── mediamtx.yml              # Tuned MediaMTX config (use this one)
+│   ├── LayerWise.svg
+│   ├── Dataplane.svg
+│   ├── flow-diagram.svg
+│   ├── Dashboard.png
+│   ├── LoginPage.png
+│   ├── server.png
+│   └── topology.jpeg
+├── mediamtx.yml
 ├── LICENSE
 └── README.md
 ```
